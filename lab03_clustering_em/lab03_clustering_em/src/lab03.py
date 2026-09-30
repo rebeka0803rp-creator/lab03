@@ -16,8 +16,8 @@ from pathlib import Path
 import numpy as np
 
 # ---- Fill in your information (used in results.json) ----
-STUDENT_ID = "00000000"   # TODO: your student id, e.g. "20261234"
-STUDENT_NAME = "None"     # TODO: your name in Korean or roman letters — "홍길동" / "HongGildong"
+STUDENT_ID = "50251515"   # TODO: your student id, e.g. "20261234"
+STUDENT_NAME = "Rebeka Petro"     # TODO: your name in Korean or roman letters — "홍길동" / "HongGildong"
 
 SEED = 42  # fixed for the whole course — DO NOT CHANGE
 DATA_PATH = Path(__file__).resolve().parent.parent / "data" / "lab03_scene.npz"
@@ -131,7 +131,44 @@ def kmeans(X: np.ndarray, k: int, rng: np.random.Generator,
         (centers, labels, inertia): centers (k, d) float64,
         labels (N,) int64, inertia plain Python float.
     """
-    raise NotImplementedError
+    X = np.asarray(X, dtype=np.float64)
+    n, d = X.shape
+    best_centers = best_labels = None
+    best_inertia = np.inf
+
+    for _ in range(n_init):
+        centers = np.empty((k, d), dtype=np.float64)
+        centers[0] = X[rng.integers(n)]
+        for j in range(1, k):
+            d2 = ((X[:, None, :] - centers[None, :j, :]) ** 2).sum(axis=2).min(axis=1)
+            total = d2.sum()
+            idx = rng.integers(n) if total == 0 else rng.choice(n, p=d2 / total)
+            centers[j] = X[idx]
+
+        prev_labels = None
+        for _it in range(max_iter):
+            dist2 = ((X[:, None, :] - centers[None, :, :]) ** 2).sum(axis=2)
+            labels = np.argmin(dist2, axis=1).astype(np.int64)
+            d2a = dist2[np.arange(n), labels].copy()
+            counts = np.bincount(labels, minlength=k)
+            for j in np.flatnonzero(counts == 0):
+                sel = int(np.argmax(d2a))
+                labels[sel] = j
+                centers[j] = X[sel]
+                d2a[sel] = -1.0
+            if prev_labels is not None and np.array_equal(labels, prev_labels):
+                break
+            prev_labels = labels.copy()
+            for j in range(k):
+                centers[j] = X[labels == j].mean(axis=0)
+
+        inertia = float(((X - centers[labels]) ** 2).sum())
+        if inertia < best_inertia:
+            best_inertia = inertia
+            best_centers = centers.copy()
+            best_labels = labels.copy()
+
+    return best_centers, best_labels, float(best_inertia)
 # ============================ END TODO (Task 1) ==============================
 
 
@@ -187,7 +224,41 @@ def gmm_em(X: np.ndarray, k: int, rng: np.random.Generator,
         the parameters after the last M-step and the responsibilities of the
         last E-step; log_likelihoods = list of max_iter plain Python floats.
     """
-    raise NotImplementedError
+    X = np.asarray(X, dtype=np.float64)
+    n, d = X.shape
+    centers, labels, _ = kmeans(X, k, rng)
+    means = centers.copy()
+    weights = np.bincount(labels, minlength=k).astype(np.float64) / n
+    covs = np.empty((k, d, d), dtype=np.float64)
+    eye = np.eye(d)
+    for j in range(k):
+        diff = X[labels == j] - means[j]
+        covs[j] = (diff.T @ diff) / len(diff) + reg * eye
+
+    lls = []
+    resp = np.empty((n, k), dtype=np.float64)
+    const = d * np.log(2.0 * np.pi)
+    for _ in range(max_iter):
+        logp = np.empty((n, k), dtype=np.float64)
+        for j in range(k):
+            diff = X - means[j]
+            sign, logdet = np.linalg.slogdet(covs[j])
+            sol = np.linalg.solve(covs[j], diff.T).T
+            maha = np.sum(diff * sol, axis=1)
+            logp[:, j] = np.log(weights[j]) - 0.5 * (const + logdet + maha)
+        m = logp.max(axis=1)
+        lse = m + np.log(np.exp(logp - m[:, None]).sum(axis=1))
+        resp = np.exp(logp - lse[:, None])
+        lls.append(float(lse.sum()))
+
+        Nk = resp.sum(axis=0)
+        weights = Nk / n
+        means = (resp.T @ X) / Nk[:, None]
+        for j in range(k):
+            diff = X - means[j]
+            covs[j] = (diff.T * resp[:, j]) @ diff / Nk[j] + reg * eye
+
+    return means, covs, weights, resp, lls
 # ============================ END TODO (Task 2) ==============================
 
 
@@ -205,7 +276,7 @@ def bic(ll: float, n_params: int, n: int) -> float:
     Returns:
         The BIC value as a plain Python float.
     """
-    raise NotImplementedError
+    return float(-2.0 * ll + n_params * np.log(n))
 
 
 def select_k(X: np.ndarray, k_range: tuple[int, ...], rng: np.random.Generator
@@ -234,7 +305,14 @@ def select_k(X: np.ndarray, k_range: tuple[int, ...], rng: np.random.Generator
         per k in order; best_k = the k with the smallest BIC (ties -> the
         smaller k).
     """
-    raise NotImplementedError
+    n, d = X.shape
+    bic_values = []
+    for k in k_range:
+        _, _, _, _, lls = gmm_em(X, k, rng)
+        n_params = k * d + k * d * (d + 1) // 2 + (k - 1)
+        bic_values.append(bic(lls[-1], n_params, n))
+    best_idx = int(np.argmin(bic_values))
+    return [float(v) for v in bic_values], int(k_range[best_idx])
 # ============================ END TODO (Task 3) ==============================
 
 
@@ -271,7 +349,32 @@ def run_experiment(data: dict, rng: np.random.Generator) -> dict:
          "ll_first": float, "ll_final": float, "ll_min_delta": float,
          "bic_k2": float, ..., "bic_k8": float, "best_k": int}
     """
-    raise NotImplementedError
+    X = data["X"]
+    labels = data["labels"]
+    _, km_labels, inertia = kmeans(X, K_OBJECTS, rng)
+    _, _, _, resp, lls = gmm_em(X, K_OBJECTS, rng)
+    gmm_labels = resp.argmax(axis=1)
+
+    ari_kmeans = adjusted_rand_index(labels, km_labels)
+    ari_gmm = adjusted_rand_index(labels, gmm_labels)
+    ll_first = lls[0]
+    ll_final = lls[-1]
+    ll_min_delta = float(np.min(np.diff(lls)))
+    bic_values, best_k = select_k(X, K_RANGE, rng)
+
+    result = {
+        "n_points": int(len(X)),
+        "kmeans_inertia": round(float(inertia), 4),
+        "ari_kmeans": round(float(ari_kmeans), 4),
+        "ari_gmm": round(float(ari_gmm), 4),
+        "ll_first": round(float(ll_first), 4),
+        "ll_final": round(float(ll_final), 4),
+        "ll_min_delta": round(float(ll_min_delta), 9),
+        "best_k": int(best_k),
+    }
+    for k, value in zip(K_RANGE, bic_values):
+        result[f"bic_k{k}"] = round(float(value), 4)
+    return result
 # ============================ END TODO (Task 4) ==============================
 
 
